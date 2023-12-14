@@ -8,3 +8,4 @@ In the second model, we include information on Reactive Oxygen Species dynamics.
 Once the parameters have been obtained, we can simulated serial transfers (see end of R Markdown file for an example). In order to run transfers in a broader parameter area to explore coexistence (Fig 4), we implement the parameter sweep in C++. The code for the transfers for model 1 can be found in "transfersmodel1.cpp" and for model 2 in "transfersmodel2.cpp". 
 
 To compile the C++ scripts, run the following command in a terminal: "g++ transfersmodel2.cpp -o nameoftheex -lgsl -lgslcblas" then execute "./nameoftheex".
+An example of the output of this C++ script is given in "Model2_cocult_5.txt"
