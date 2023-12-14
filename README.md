@@ -1,5 +1,5 @@
 # oxidative-stress-fitting
-Fitting code for Di Martino et al 2023 - fitting bacterial growth in different oxidative stress concentrations.
+Fitting code for Di Martino et al 2023 - fitting bacterial growth in different oxidative stress concentrations (https://www.biorxiv.org/content/10.1101/2023.05.24.542164v1.abstract).
 
 This repository contains the R Markdown script that follows the steps used to fit the growth of At and Ct in different linoleic acid concentrations. 
 In the first model, the toxicity is implicit. Data corresponding to the first model is loaded through the "CFU_data_model1.RData file". 
