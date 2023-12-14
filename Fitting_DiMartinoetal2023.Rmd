@@ -1,0 +1,1785 @@
+---
+title: "Fitting code for Di Martino et al 2023"
+output:
+  html_notebook:
+    toc: yes
+    code_folding: hide
+  html_document: 
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r, echo=FALSE}
+library(ggplot2) #library for plotting
+library(reshape2) # library for reshaping data (tall-narrow <-> short-wide)
+library(deSolve) # library for solving differential equations
+library(minpack.lm) #the fitting 
+library(scales)
+library(FME)
+library(utils)
+library(diffeqr)
+library(MetBrewer)
+library(cowplot)
+
+cola = "#1b9e77"
+colc = "#7570b3"
+
+colAt = c("#b7e4c7","#2bdba6","#1b9e77","darkgreen")
+colCt = c("#c5c3df","#a5a2ce","#7570b3","#4f4a8d")
+
+boolfit = 0 #do we want to rerun the fitting part? 
+
+```
+
+## 1. Model 1: implicit toxicity
+
+```{r, echo=FALSE}
+## Importing experimental time series data
+
+nrep=3
+time = c(0,1,2,3,6,7,8)
+ext_thr=1e-5
+
+load("CFU_data_model1.RData")
+
+AtMMini = mean(c(as.numeric(AtMM[1,]),as.numeric(AtMM2[1,])))
+Atx2MMini = mean(as.numeric(Atx2MM[1,]))
+AtMMwCtini = mean(as.numeric(AtMMwCt[1,]))
+CtMMini = mean(c(as.numeric(CtMM[1,]),as.numeric(CtMM2[1,])))
+Ctx2MMini = mean(as.numeric(Ctx2MM[1,]))
+CtMMwAtini = mean(as.numeric(CtMMwAt[1,]))
+
+At01ini=mean(as.numeric(At01[1,]))
+At005ini=mean(as.numeric(At005[1,]))
+At05ini=mean(as.numeric(At05[1,]))
+At075ini=mean(as.numeric(At075[1,]))
+
+
+Ct01ini=mean(as.numeric(Ct01[1,]))
+Ct05ini=mean(as.numeric(Ct05[1,]))
+Ct005ini=mean(as.numeric(Ct005[1,]))
+Ct075ini=mean(as.numeric(Ct075[1,]))
+
+AtCt01ini=mean(as.numeric(AtCt01[1,]))
+AtCt075ini=mean(as.numeric(AtCt075[1,]))
+CtAt01ini=mean(as.numeric(CtAt01[1,]))
+CtAt075ini=mean(as.numeric(CtAt075[1,]))
+
+At005$time = time
+At01$time = time
+At05$time = time
+At075$time = time
+
+Ct005$time=time
+Ct01$time=time
+Ct05$time=time
+Ct075$time=time
+
+```
+
+In the first model (model 1), we do not have any information on what causes the toxicity of linoleic acid towards At. Based on the experimental growth curves, we know that the toxicity of linoleic acid is not immediate: at a high LA concentration, At first grows at higher levels than explained by the minimal medium growth and then dies after 3 days. We then assume a simple linear accumulation of toxicity over time.
+
+We first start by fitting the minimal medium growth curves.
+
+### 1.1 Fitting growth in the minimal medium
+
+```{r, echo=FALSE}
+## General functions 
+eventfun <- function(t, y, parms){
+  with (as.list(y),{
+    y[y <= ext_thr] <- 0
+    return(y)
+  })
+}
+
+## Fitting the growth of At and Ct in the no-LA condition (minimal medium) using both coculture and monocuture of At and Ct in the minimal medium
+
+#ODE system for the minimal medium (arbitrary unknown nutrient concentration)
+FuncCoMM=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact1 = rn1*Comp/(Comp + Kn1)*Bact1    #bacteria 1: Ct
+    dBact2 = rn2*Comp/(Comp + Kn2)*Bact2   #bacteria 2: At
+    dComp = - 1/Yn1*rn1*Comp/(Comp + Kn1)*Bact1 - 1/Yn2*rn2*Comp/(Comp + Kn2)*Bact2 #the minimal medium nutrient
+    return(list(c(dBact1,dBact2,dComp)))
+  })
+}
+
+
+### the residual function, using the difference between the log of each experimental time point and predicted time point abundances.
+
+ssqFuncCoMM=function(para){
+  ssqres = {}
+  # the inital concentration is known 
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  
+  parmsestim = 10^para 
+  #coculture of Ct and At
+  outco=ode(y=c(Bact1=CtMMwAtini,Bact2=AtMMwCtini,Comp=compini),times=ti,func=FuncCoMM,parms=parmsestim, events = list(func = eventfun, time = ti))
+  # Select the time points from the model which correspond to experimental data time points
+  outcodf=data.frame(outco)
+  outcodf=outcodf[outcodf$time %in% time,]
+  outcodf[outcodf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outcodf$Bact1) - log(CtMMwAt[,i]), log(outcodf$Bact2) - log(AtMMwCt[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  #monoculture of Ct
+  outCt=ode(y=c(Bact1=CtMMini,Bact2=0,Comp=compini),times=ti,func=FuncCoMM,parms=parmsestim,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outCtdf=data.frame(outCt)
+  outCtdf=outCtdf[outCtdf$time %in% time,]
+  outCtdf[outCtdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    #ssqres = c(ssqres, log(outCtdf$Bact1) - log(CtMM[,i]), log(outCtdf$Bact1) - log(CtMM2[,i]))
+    ssqres = c(ssqres, log(outCtdf$Bact1) - log(CtMM[,i]))#add residual comparing estimated with the different replicates
+  }
+  
+  #monoculture of Ct with a different initial abundance
+  outCt2=ode(y=c(Bact1=Ctx2MMini,Bact2=0,Comp=compini),times=ti,func=FuncCoMM,parms=parmsestim,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outCt2df=data.frame(outCt2)
+  outCt2df=outCt2df[outCt2df$time %in% time,]
+  outCt2df[outCt2df<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outCt2df$Bact1) - log(Ctx2MM[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  #monoculture of At
+  outAt=ode(y=c(Bact1=0,Bact2=AtMMini,Comp=compini),times=ti,func=FuncCoMM,parms=parmsestim,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outAtdf=data.frame(outAt)
+  outAtdf=outAtdf[outAtdf$time %in% time,]
+  outAtdf[outAtdf<ext_thr]=ext_thr
+  
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outAtdf$Bact2) - log(AtMM[,i]))
+  }
+  
+  #monoculture of At with a different initial condition
+  outAt2=ode(y=c(Bact1=0,Bact2=Atx2MMini,Comp=compini),times=ti,func=FuncCoMM,parms=parmsestim,events = list(func = eventfun, time = ti))
+  outAt2df=data.frame(outAt2)
+  outAt2df=outAt2df[outAt2df$time %in% time,]
+  outAt2df[outAt2df<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outAt2df$Bact2) - log(Atx2MM[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+
+  # return predicted vs experimental residual
+  return(ssqres)
+}
+```
+
+```{r, echo=FALSE}
+## setting an arbitrary value for the minimal medium initial concentration
+compini=0.01
+
+tmax=8
+ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+ti=sort(unique(ti))
+parmsestim = c(rn1=1, rn2=1, Yn1=9, Yn2=8,Kn1=-2,Kn2=-2)
+if (boolfit) {fitMM=modFit(p=parmsestim,f=ssqFuncCoMM)}
+coefs = coef(fitMM)
+```
+
+```{r, echo=FALSE}
+#sum(ssqFuncCoMM(coefs)^2)
+```
+
+```{r, echo=FALSE, fig.width=5,fig.height=4}
+transpar = 0.8
+# Plotting the growth in MM + the fit
+plot(AtMM[,1]~time,type="l",ylim=c(1e5,5e7),log="y",col=alpha(cola,transpar),lwd=2,ylab="CFU/mL", main="At and Ct in minimal medium")
+points(AtMM[,1]~time,type="p",pch=19,col=alpha(cola,transpar))
+points(AtMM[,2]~time,type="p",pch=19,col=alpha(cola,transpar))
+points(AtMM[,3]~time,type="p",pch=19,col=alpha(cola,transpar))
+lines(AtMM[,2]~time,col=alpha(cola,transpar),lwd=2)
+lines(AtMM[,3]~time,col=alpha(cola,transpar),lwd=2)
+points(AtMMwCt[,1]~time,type="p",pch=19,col=alpha(cola,transpar))
+lines(AtMMwCt[,1]~time,pch=19,col=alpha(cola,transpar),lty="dashed",lwd=2)
+points(AtMMwCt[,2]~time,type="p",pch=19,col=alpha(cola,transpar))
+lines(AtMMwCt[,2]~time,pch=19,col=alpha(cola,transpar),lty="dashed",lwd=2)
+points(AtMMwCt[,3]~time,type="p",pch=19,col=alpha(cola,transpar))
+lines(AtMMwCt[,3]~time,pch=19,col=alpha(cola,transpar),lty="dashed",lwd=2)
+lines(CtMM[,1]~time,col=alpha(colc,transpar),lwd=2)
+points(CtMM[,1]~time,type="p",pch=19,col=alpha(colc,transpar))
+points(CtMM[,2]~time,type="p",pch=19,col=alpha(colc,transpar))
+points(CtMM[,3]~time,type="p",pch=19,col=alpha(colc,transpar))
+lines(CtMM[,2]~time,col=alpha(colc,transpar),lwd=2)
+lines(CtMM[,3]~time,col=alpha(colc,transpar),lwd=2)
+lines(CtMM2[,1]~time,col=alpha(colc,transpar),lwd=2)
+points(CtMMwAt[,1]~time,type="p",pch=19,col=alpha(colc,transpar))
+lines(CtMMwAt[,1]~time,pch=19,col=alpha(colc,transpar),lty="dashed",lwd=2)
+points(CtMMwAt[,2]~time,type="p",pch=19,col=alpha(colc,transpar))
+lines(CtMMwAt[,2]~time,pch=19,col=alpha(colc,transpar),lty="dashed",lwd=2)
+points(CtMMwAt[,3]~time,type="p",pch=19,col=alpha(colc,transpar))
+lines(CtMMwAt[,3]~time,pch=19,col=alpha(colc,transpar),lty="dashed",lwd=2)
+legend(x="bottomright",
+       c("At","At (Ct)","Ct","Ct (At)"),
+       col=c(alpha(cola,transpar),alpha(cola,transpar),alpha(colc,transpar),alpha(colc,transpar)),
+       lty=c(1,2,1,2),
+       lwd=c(1,1,1,1),
+       pch=c(20,20,20,20),bty="n")
+
+par10 = 10^coefs
+sol=ode(y=c(Bact1=CtMMwAtini,Bact2=AtMMwCtini,Comp=compini),times=ti,func=FuncCoMM,parms=par10,events = list(func = eventfun, time = ti))
+points(Bact1~ti,sol,type="l",lwd=4,lty="dashed",col=colc)
+points(Bact2~ti,sol,type="l",lwd=4,lty="dashed",col=cola)
+ss=ode(y=c(Bact1=CtMMini,Bact2=0,Comp=compini),times=ti,func=FuncCoMM,parms=par10,events = list(func = eventfun, time = ti))
+points(Bact1~ti,ss,type="l",lwd=4,col=colc)
+ss2=ode(y=c(Bact1=0,Bact2=AtMMini,Comp=compini),times=ti,func=FuncCoMM,parms=par10,events = list(func = eventfun, time = ti))
+points(Bact2~ti,ss2,type="l",lwd=4,col=cola)
+```
+
+```{r, echo=FALSE}
+parmsAtMM = c(rn = as.list(par10)$rn2, Kn =  as.list(par10)$Kn2, Yn =  as.list(par10)$Yn2)
+parmsCtMM = c(rn = as.list(par10)$rn1, Kn =  as.list(par10)$Kn1, Yn =  as.list(par10)$Yn1)
+```
+
+### 1.2 Fitting At monoculture parameters
+
+
+```{r,echo=FALSE}
+## accumulation of toxicity
+FuncTox = function(t, beta, gamma) {
+  return (beta + gamma*t)
+}
+
+FuncMonoAcc=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact = rn*Nu/(Nu + Kn)*Bact + rc*Comp/(Comp + Kc)*Bact - FuncTox(t,beta,gamma)*Comp*Bact  #bacteria
+    dNu = - 1/Yn*rn*Nu/(Nu + Kn)*Bact #compound in MM
+    dComp = - 1/Yc*rc*Comp/(Comp + Kc)*Bact #linoleic acid
+    return(list(c(dBact,dNu,dComp)))
+  })
+}
+```
+
+
+```{r,echo=FALSE}
+ssqAtMonoAcc=function(parmsestim){
+  ssqrestot = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  parmsode = c(10^parmsestim, parmsAtMM) # the minimal medium parameters are fixed
+
+    #growth in 0.05%
+  out=ode(y=c(Bact=At005ini,Nu=compini,Comp=0.05),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  ssqres005 = {}
+  for (i in 1:nrep) {
+    ssqres005 = c(ssqres005, log(outdf$Bact) - log(At005[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  #growth in 0.1%
+  out=ode(y=c(Bact=At01ini,Nu=compini,Comp=0.1),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  ssqres01 = {}
+  for (i in 1:nrep) {
+    ssqres01 = c(ssqres01, log(outdf$Bact) - log(At01[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  #growth in 0.5%
+  out2=ode(y=c(Bact=At05ini,Nu=compini,Comp=0.5),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  ssqres05 = {}
+  for (i in 1:3) {#we remove the replicate where At dies at 0.5%
+    ssqres05 = c(ssqres05, log(outdf2$Bact) - log(At05[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  #growth in 0.75%
+  out2=ode(y=c(Bact=At075ini,Nu=compini,Comp=0.75),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  ssqres075={}
+  for (i in 1:nrep) {
+    ssqres075 = c(ssqres075, log(outdf2$Bact) - log(At075[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  ssqres = c(ssqres005,ssqres01,ssqres05,ssqres075)
+  
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+```
+
+```{r,echo=FALSE}
+ssqAtMonoAcc01075=function(par){
+  ssqrestot = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+ # parmsode = c(10^parmsestim, parmsAtMM) # the minimal medium parameters are fixed
+  parmsode = par
+  
+  #growth in 0.1%
+  out=ode(y=c(Bact=At01ini,Nu=compini,Comp=0.1),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  ssqres01 = {}
+  for (i in 1:nrep) {
+    ssqres01 = c(ssqres01, log(outdf$Bact) - log(At01[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+ 
+  
+  #growth in 0.75%
+  out2=ode(y=c(Bact=At075ini,Nu=compini,Comp=0.75),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  ssqres075={}
+  for (i in 1:nrep) {
+    ssqres075 = c(ssqres075, log(outdf2$Bact) - log(At075[,i])) #add residual comparing estimated with the different replicates
+  }
+  
+  ssqres = c(ssqres01,ssqres075)
+  
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+
+```
+
+```{r,echo = FALSE}
+parmstest = log10(c(rc = 6, Kc = 0.06, Yc=3e9,  beta = 5, gamma=2)) #manual fit
+if (boolfit) {fitAt = modFit(f = ssqAtMonoAcc,p=parmstest,jac = NULL)}
+
+
+```
+
+```{r,echo = FALSE,fig.width=5,fig.height=4}
+transpar = 0.8
+
+plot(At005[,1]~time,type="l",col=alpha(colAt[1],transpar), ylab="CFU/mL",log="y",ylim=c(1e1,1e9),main="Fitting At in monoculture (model 1)",lwd=2)
+points(At005[,1]~time,type="p",pch=19,col=alpha(colAt[1],transpar))
+lines(At005[,2]~time,type="l",col=alpha(colAt[1],transpar),lwd=2)
+points(At005[,2]~time,type="p",pch=19,col=alpha(colAt[1],transpar))
+lines(At005[,3]~time,type="l",col=alpha(colAt[1],transpar),lwd=2)
+points(At005[,3]~time,type="p",pch=19,col=alpha(colAt[1],transpar))
+
+points(At01[,1]~time,type="l",col=alpha(colAt[2],transpar),lwd=2)
+points(At01[,1]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(At01[,2]~time,type="l",col=alpha(colAt[2],transpar),lwd=2)
+points(At01[,2]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(At01[,3]~time,type="l",col=alpha(colAt[2],transpar),lwd=2)
+points(At01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+
+lines(At05[,1]~time,lwd=2,col=alpha(colAt[3],transpar))
+points(At05[,1]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At05[,2]~time,type="l",col=alpha(colAt[3],transpar),lwd=2)
+points(At05[,2]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+#lines(At05[,3]~time,type="l",col=alpha(colAt[3],transpar),lwd=2)
+#points(At05[,3]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+
+lines(At075[,1]~time,type="l",col=alpha(colAt[4],transpar),lwd=2)
+points(At075[,1]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(At075[,2]~time,type="l",col=alpha(colAt[4],transpar),lwd=2)
+points(At075[,2]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(At075[,3]~time,type="l",col=alpha(colAt[4],transpar),lwd=2)
+points(At075[,3]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+legend("bottomleft",
+       legend=c("0.05%","0.1%","0.5%","0.75%","data","fit"),
+       col=c(colAt,"black",alpha("black",0.9)),
+       pch=c(19,19,19,19,19,NA),bty="n",lwd=c(2,2,2,2,2,5),lty=c(1,1,1,1,1,3))
+parmsodAt = c(10^coef(fitAt), parmsAtMM)
+
+
+out=ode(y=c(Bact = At005ini,Nu=compini,Comp = 0.05),times=ti,func=FuncMonoAcc,parms=parmsodAt,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[1],0.9),lty="dotted")
+out=ode(y=c(Bact = At01ini,Nu=compini,Comp = 0.1),times=ti,func=FuncMonoAcc,parms=parmsodAt,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[2],0.9),lty="dotted")
+out=ode(y=c(Bact = At075ini,Nu=compini,Comp = 0.75),times=ti,func=FuncMonoAcc,parms=parmsodAt,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[4],0.9),lty="dotted")
+out=ode(y=c(Bact = At05ini,Nu=compini,Comp = 0.5),times=ti,func=FuncMonoAcc,parms=parmsodAt,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[3],0.9),lty="dotted")
+```
+
+```{r,echo = TRUE}
+## Goodness of fit of monocultures (sum of errors):
+#sum(ssqAtMonoAcc(coef(fitAt))^2)
+```
+
+To be symmetrical between the two bacteria we also assume the same model of toxicity accumulation for Ct, even though LA does not seem to be toxic for Ct.
+
+### 1.3 Fitting Ct monoculture parameters
+
+```{r,echo=FALSE}
+ssqCtMonoAcc=function(parmsestim){
+  ssqres = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  parmsode = c(10^parmsestim, parmsCtMM)
+  
+  
+  # solve ODE for a given set of parameters
+  out=ode(y=c(Bact=Ct005ini,Nu=compini,Comp=0.05),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct005[,i]))
+  }
+  
+  out=ode(y=c(Bact=Ct01ini,Nu=compini,Comp=0.1),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct01[,i]))
+  }
+  
+  out=ode(y=c(Bact=Ct05ini,Nu=compini,Comp=0.5),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct05[,i]))
+  }
+  
+  out=ode(y=c(Bact=Ct075ini,Nu=compini,Comp=0.75),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct075[,i])) 
+  }
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+```
+
+```{r,echo=FALSE}
+ssqCtMonoAcc01075=function(par){
+  ssqres = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  parmsode = par
+  
+  out=ode(y=c(Bact=Ct01ini,Nu=compini,Comp=0.1),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct01[,i]))
+  }
+  
+  out=ode(y=c(Bact=Ct075ini,Nu=compini,Comp=0.75),times=ti,func=FuncMonoAcc,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct075[,i])) 
+  }
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+```
+
+```{r,echo=FALSE}
+parmsestimCt = log10(c(rc = 20, Kc = 1, Yc = 2e9, beta = 0.1, gamma=0.1))
+if (boolfit) {fitCt = modFit(f = ssqCtMonoAcc,p=parmsestimCt,jac = NULL)}
+```
+
+```{r,echo=FALSE,fig.width=5,fig.height=4}
+parmsodCt = c(10^coef(fitCt), parmsCtMM)
+
+out005=ode(y=c(Bact = Ct005ini,Nu=compini,Comp = 0.05),times=ti,func=FuncMonoAcc,parms=parmsodCt,events = list(func = eventfun, time = ti))
+out005=as.data.frame(out005)
+
+out01=ode(y=c(Bact = Ct01ini,Nu=compini,Comp = 0.1),times=ti,func=FuncMonoAcc,parms=parmsodCt,events = list(func = eventfun, time = ti))
+out01=as.data.frame(out01)
+
+out05=ode(y=c(Bact = Ct05ini,Nu=compini,Comp = 0.5),times=ti,func=FuncMonoAcc,parms=parmsodCt,events = list(func = eventfun, time = ti))
+out05=as.data.frame(out05)
+
+out075=ode(y=c(Bact = Ct075ini,Nu=compini,Comp = 0.75),times=ti,func=FuncMonoAcc,parms=parmsodCt,events = list(func = eventfun, time = ti))
+out075=as.data.frame(out075)
+
+plot(Ct005[,1]~time,type="l",col=alpha(colCt[1],transpar), ylab="CFU/mL",log="y",ylim=c(1e5,1e10),main="Fitting Ct in monoculture (model 1)",lwd=3)
+points(Ct005[,1]~time,type="p",pch=19,col=alpha(colCt[1],transpar))
+lines(Ct005[,2]~time,type="l",col=alpha(colCt[1],transpar),lwd=3)
+points(Ct005[,2]~time,type="p",pch=19,col=alpha(colCt[1],transpar))
+lines(Ct005[,3]~time,type="l",col=alpha(colCt[1],transpar),lwd=3)
+points(Ct005[,3]~time,type="p",pch=19,col=alpha(colCt[1],transpar))
+
+points(Ct01[,1]~time,type="l",col=alpha(colCt[2],transpar),lwd=3)
+points(Ct01[,1]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(Ct01[,2]~time,type="l",col=alpha(colCt[2],transpar),lwd=3)
+points(Ct01[,2]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(Ct01[,3]~time,type="l",col=alpha(colCt[2],transpar),lwd=3)
+points(Ct01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+
+lines(Ct05[,1]~time,lwd=3,col=alpha(colCt[3],transpar))
+points(Ct05[,1]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct05[,2]~time,type="l",col=alpha(colCt[3],transpar),lwd=3)
+points(Ct05[,2]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct05[,3]~time,type="l",col=alpha(colCt[3],transpar),lwd=3)
+points(Ct05[,3]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+
+lines(Ct075[,1]~time,type="l",col=alpha(colCt[4],transpar),lwd=3)
+points(Ct075[,1]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(Ct075[,2]~time,type="l",col=alpha(colCt[4],transpar),lwd=3)
+points(Ct075[,2]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(Ct075[,3]~time,type="l",col=alpha(colCt[4],transpar),lwd=3)
+points(Ct075[,3]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+legend("bottomright",legend=c("0.05%","0.1%","0.5%","0.75%"),col=colCt,pch=19,bty="n",lwd=3)
+
+points(out005[,2]~out005[,1],type="l",lwd=7,col=alpha(colCt[1],0.6),lty="dotted")
+points(out01[,2]~out01[,1],type="l",lwd=7,col=alpha(colCt[2],0.6),lty="dotted")
+points(out05[,2]~out05[,1],type="l",lwd=7,col=alpha(colCt[4],0.6),lty="dotted")
+points(out075[,2]~out075[,1],type="l",lwd=7,col=alpha(colCt[3],0.6),lty="dotted")
+```
+
+```{r,echo=FALSE}
+#goodness of fit
+
+#sum(ssqCtMonoAcc(coef(fitCt))^2)
+```
+
+### 1.4 Comparing co-culture prediction with co-culture data
+
+What about the co-culture prediction?
+
+```{r,echo=FALSE}
+parmsodCt = as.data.frame(t(parmsodCt))
+parmsodAt = as.data.frame(t(parmsodAt))
+```
+
+```{r,echo=FALSE}
+parmtot_model1 = list(rc1 = parmsodCt$rc,
+               Kc1 = parmsodCt$Kc,
+               beta1 = parmsodCt$beta,
+               Yc1 = parmsodCt$Yc,
+               gamma1 = parmsodCt$gamma,
+               rn1 = parmsodCt$rn,
+               Kn1 = parmsodCt$Kn,
+               Yn1 = parmsodCt$Yn,
+               rc2 = parmsodAt$rc,
+               Kc2 = parmsodAt$Kc,
+               beta2 = parmsodAt$beta,
+               Yc2 = parmsodAt$Yc,
+               gamma2 = parmsodAt$gamma,
+               rn2 = parmsodAt$rn,
+               Kn2 = parmsodAt$Kn,
+               Yn2 = parmsodAt$Yn)
+
+### Coculture ODE system in model 1
+FuncCoCult=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact1 = rn1*Nu/(Nu + Kn1)*Bact1 + rc1*Comp/(Comp + Kc1)*Bact1 - FuncTox(t,beta1,gamma1)*Comp*Bact1
+    dBact2 = rn2*Nu/(Nu + Kn2)*Bact2 + rc2*Comp/(Comp + Kc2)*Bact2 - FuncTox(t,beta2,gamma2)*Comp*Bact2
+    dNu = - 1/Yn1*rn1*Nu/(Nu + Kn1)*Bact1 - 1/Yn2*rn2*Nu/(Nu + Kn2)*Bact2  
+    dComp = -1/Yc1*rc1*Comp/(Comp + Kc1)*Bact1 -1/Yc2*rc2*Comp/(Comp + Kc2)*Bact2   
+    return(list(c(dBact1,dBact2,dNu,dComp)))
+  })
+}
+```
+
+```{r,echo=FALSE,fig.height=6,fig.width=12}
+ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+ti=sort(unique(ti))
+
+par(mfrow=c(1,2))
+plot(CtAt01[,1]~time,col=alpha(colCt[2],0.5),lwd=2,type="l",ylim=c(1e4,1e10),log="y",lty="solid", ylab="CFU/mL",main="Cocultures at 0.1%",bty="n")
+points(CtAt01[,1]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,2]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(CtAt01[,2]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(CtAt01[,3]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,1]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+points(AtCt01[,1]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,2]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(AtCt01[,2]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,3]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+cocult1 = ode(y=c(Bact1 = CtAt01ini,Bact2 = AtCt01ini,Nu=compini,Comp = 0.1),times=ti,func=FuncCoCult,parms=parmtot_model1,events = list(func = eventfun, time = ti))
+lines(Bact1~time,cocult1,col=colCt[2],lty="dotted",lwd=3)
+lines(Bact2~time,cocult1,col=colAt[2],lty="dotted",lwd=3)
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[2],0.5),alpha(colAt[2],0.5),colCt[2],colAt[2]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,2,2),pch=c(19,19,NA,NA),bty="n",cex=0.8)
+
+
+plot(CtAt075[,1]~time,col=alpha(colCt[4],0.5),lwd=2,type="l",log="y",ylim=c(1e4,1e10),lty="solid",ylab="CFU/mL",main="Cocultures at 0.75%",bty="n")
+points(CtAt075[,1]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,2]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,3]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(CtAt075[,2]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+lines(CtAt075[,3]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+points(AtCt075[,1]~time,col=alpha(colAt[4],0.5),lwd=2,type="l",lty="solid")
+points(AtCt075[,1]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,2]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,3]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(AtCt075[,2]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+lines(AtCt075[,3]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+cocult2 = ode(y=c(Bact1 = CtAt075ini,Bact2 = AtCt075ini,Nu=compini,Comp = 0.75),times=ti,func=FuncCoCult,parms=parmtot_model1,events = list(func = eventfun, time = ti))
+points(Bact1~time,cocult2,type="l",col=colCt[4],lwd=5,lty="dotted")
+points(Bact2~time,cocult2,type="l",col=colAt[4],lwd=5,lty="dotted")
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[4],0.5),alpha(colAt[4],0.5),colCt[4],colAt[4]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,3,3),bty="n",cex=0.8,pch=c(19,19,NA,NA))
+```
+
+Error of model 1:
+
+```{r,echo=FALSE}
+## Compute the error of model 1 (sum of squares)
+
+#error at 0.1%
+cocult1df=data.frame(cocult1)
+cocult1df=cocult1df[cocult1df$time %in% time,]
+cocult1df[cocult1df<ext_thr]=ext_thr
+ssqcocult1 = {}
+for (i in 1:nrep) {
+  ssqcocult1 = c(ssqcocult1, log(cocult1df$Bact1) - log(CtAt01[,i]), log(cocult1df$Bact2) - log(AtCt01[,i])) #add residual comparing estimated with the different replicates
+}
+sumerror01_model1 = sum(ssqcocult1^2)
+print(paste("Sum of errors at 0.1%: ", sumerror01_model1))
+
+#error at 0.75%
+cocult2df=data.frame(cocult2)
+cocult2df=cocult2df[cocult2df$time %in% time,]
+cocult2df[cocult2df<ext_thr]=ext_thr
+ssqcocult2 = {}
+for (i in 1:nrep) {
+  ssqcocult2 = c(ssqcocult2, log(cocult2df$Bact1) - log(CtAt075[,i]), log(cocult2df$Bact2) - log(AtCt075[,i])) #add residual comparing estimated with the different replicates
+}
+sumerror075_model1 = sum(ssqcocult2^2)
+print(paste("Sum of errors at 0.75%: ", sumerror075_model1))
+summodel1 = sumerror01_model1 + sumerror075_model1
+
+print(paste("Sum of errors: ", summodel1))
+
+
+```
+
+### 1.5 Parameter set of the main text
+
+```{r,echo=FALSE}
+parmsodCt_1 = c(rc = 2.378423 , Kc =  0.0005943006, beta =  0.2994206, Yc =  1382887081, gamma = 3.014306e-06, rn = 346.5335, Kn = 0.100519, Yn =  1277901049)   
+
+parmsodAt_1 = c(rc = 1.941358, Kc = 0.001000012, beta = 3.359035, Yc = 2380679472, gamma = 0.5627613, rn = 891.433, Kn = 1.013203, Yn = 313918816)   
+
+
+parmsodCt_1 = as.data.frame(t(parmsodCt_1))
+parmsodAt_1 = as.data.frame(t(parmsodAt_1))
+
+## error of monoculture fit 
+#print(sum((ssqAtMonoAcc01075(parmsodAt_1))^2) + sum((ssqCtMonoAcc01075(parmsodCt_1))^2))
+```
+
+```{r,fig.width=15,fig.height=10,echo=FALSE}
+parmtot_1 = list(rc1 = parmsodCt_1$rc,
+               Kc1 = parmsodCt_1$Kc,
+               beta1 = parmsodCt_1$beta,
+               Yc1 = parmsodCt_1$Yc,
+               gamma1 = parmsodCt_1$gamma,
+               rn1 = parmsodCt_1$rn,
+               Kn1 = parmsodCt_1$Kn,
+               Yn1 = parmsodCt_1$Yn,
+               
+               rc2 = parmsodAt_1$rc,
+               Kc2 = parmsodAt_1$Kc,
+               beta2 = parmsodAt_1$beta,
+               Yc2 = parmsodAt_1$Yc,
+               gamma2 = parmsodAt_1$gamma,
+               rn2 = parmsodAt_1$rn,
+               Kn2 = parmsodAt_1$Kn,
+               Yn2 = parmsodAt_1$Yn)
+
+
+par(mfrow=c(2,2))
+plot(At005[,1]~time,type="l",col=alpha(colAt[1],transpar), ylab="CFU/mL",log="y",ylim=c(1e1,1e9),main="Fitting At growth in monoculture",lwd=2)
+points(At005[,1]~time,type="p",pch=19,col=alpha(colAt[1],transpar))
+lines(At005[,2]~time,type="l",col=alpha(colAt[1],transpar),lwd=2)
+points(At005[,2]~time,type="p",pch=19,col=alpha(colAt[1],transpar))
+lines(At005[,3]~time,type="l",col=alpha(colAt[1],transpar),lwd=2)
+points(At005[,3]~time,type="p",pch=19,col=alpha(colAt[1],transpar))
+
+points(At01[,1]~time,type="l",col=alpha(colAt[2],transpar),lwd=2)
+points(At01[,1]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(At01[,2]~time,type="l",col=alpha(colAt[2],transpar),lwd=2)
+points(At01[,2]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(At01[,3]~time,type="l",col=alpha(colAt[2],transpar),lwd=2)
+points(At01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+
+lines(At05[,1]~time,lwd=2,col=alpha(colAt[3],transpar))
+points(At05[,1]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At05[,2]~time,type="l",col=alpha(colAt[3],transpar),lwd=2)
+points(At05[,2]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At05[,3]~time,type="l",col=alpha(colAt[3],transpar),lwd=2)
+points(At05[,3]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+
+lines(At075[,1]~time,type="l",col=alpha(colAt[4],transpar),lwd=2)
+points(At075[,1]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(At075[,2]~time,type="l",col=alpha(colAt[4],transpar),lwd=2)
+points(At075[,2]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(At075[,3]~time,type="l",col=alpha(colAt[4],transpar),lwd=2)
+points(At075[,3]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+legend("bottomleft",
+       legend=c("0.05%","0.1%","0.5%","0.75%","data","fit"),
+       col=c(colAt,"black",alpha("black",0.9)),
+       pch=c(19,19,19,19,19,NA),bty="n",lwd=c(2,2,2,2,2,5),lty=c(1,1,1,1,1,2))
+add.label <- function(label, ...) legend("topleft", legend=" ", title=label,
+bty='n', ...)
+
+
+#print(sum(ssqAtMonoAcc(log10(parmsodAt_1))^2))
+
+
+out=ode(y=c(Bact = At005ini,Nu=compini,Comp = 0.05),times=ti,func=FuncMonoAcc,parms=parmsodAt_1,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[1],0.9),lty="dashed")
+out=ode(y=c(Bact = At01ini,Nu=compini,Comp = 0.1),times=ti,func=FuncMonoAcc,parms=parmsodAt_1,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[2],0.9),lty="dashed")
+out=ode(y=c(Bact = At075ini,Nu=compini,Comp = 0.75),times=ti,func=FuncMonoAcc,parms=parmsodAt_1,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[4],0.9),lty="dashed")
+out=ode(y=c(Bact = At05ini,Nu=compini,Comp = 0.5),times=ti,func=FuncMonoAcc,parms=parmsodAt_1,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=alpha(colAt[3],0.9),lty="dashed")
+
+
+
+out005=ode(y=c(Bact = Ct005ini,Nu=compini,Comp = 0.05),times=ti,func=FuncMonoAcc,parms=parmsodCt_1,events = list(func = eventfun, time = ti))
+out005=as.data.frame(out005)
+
+out01=ode(y=c(Bact = Ct01ini,Nu=compini,Comp = 0.1),times=ti,func=FuncMonoAcc,parms=parmsodCt_1,events = list(func = eventfun, time = ti))
+out01=as.data.frame(out01)
+
+out05=ode(y=c(Bact = Ct05ini,Nu=compini,Comp = 0.5),times=ti,func=FuncMonoAcc,parms=parmsodCt_1,events = list(func = eventfun, time = ti))
+out05=as.data.frame(out05)
+
+out075=ode(y=c(Bact = Ct075ini,Nu=compini,Comp = 0.75),times=ti,func=FuncMonoAcc,parms=parmsodCt_1,events = list(func = eventfun, time = ti))
+out075=as.data.frame(out075)
+
+plot(Ct005[,1]~time,type="l",col=alpha(colCt[1],transpar), ylab="CFU/mL",log="y",ylim=c(1e5,1e10),main="Fitting Ct growth in monoculture",lwd=3)
+points(Ct005[,1]~time,type="p",pch=19,col=alpha(colCt[1],transpar))
+lines(Ct005[,2]~time,type="l",col=alpha(colCt[1],transpar),lwd=2)
+points(Ct005[,2]~time,type="p",pch=19,col=alpha(colCt[1],transpar))
+lines(Ct005[,3]~time,type="l",col=alpha(colCt[1],transpar),lwd=2)
+points(Ct005[,3]~time,type="p",pch=19,col=alpha(colCt[1],transpar))
+
+points(Ct01[,1]~time,type="l",col=alpha(colCt[2],transpar),lwd=2)
+points(Ct01[,1]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(Ct01[,2]~time,type="l",col=alpha(colCt[2],transpar),lwd=2)
+points(Ct01[,2]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(Ct01[,3]~time,type="l",col=alpha(colCt[2],transpar),lwd=2)
+points(Ct01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+
+lines(Ct05[,1]~time,lwd=3,col=alpha(colCt[3],transpar))
+points(Ct05[,1]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct05[,2]~time,type="l",col=alpha(colCt[3],transpar),lwd=2)
+points(Ct05[,2]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct05[,3]~time,type="l",col=alpha(colCt[3],transpar),lwd=2)
+points(Ct05[,3]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+
+lines(Ct075[,1]~time,type="l",col=alpha(colCt[4],transpar),lwd=2)
+points(Ct075[,1]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(Ct075[,2]~time,type="l",col=alpha(colCt[4],transpar),lwd=2)
+points(Ct075[,2]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(Ct075[,3]~time,type="l",col=alpha(colCt[4],transpar),lwd=2)
+points(Ct075[,3]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+legend("bottomright",
+       legend=c("0.05%","0.1%","0.5%","0.75%","data","fit"),
+       col=c(colCt,"black",alpha("black",0.9)),
+       pch=c(19,19,19,19,19,NA),bty="n",lwd=c(2,2,2,2,2,5),lty=c(1,1,1,1,1,2))
+
+points(out005[,2]~out005[,1],type="l",lwd=5,col=alpha(colCt[1],0.6),lty="dashed")
+points(out01[,2]~out01[,1],type="l",lwd=5,col=alpha(colCt[2],0.6),lty="dashed")
+points(out05[,2]~out05[,1],type="l",lwd=5,col=alpha(colCt[4],0.6),lty="dashed")
+points(out075[,2]~out075[,1],type="l",lwd=5,col=alpha(colCt[3],0.6),lty="dashed")
+
+#goodness of fit
+#print(sum(ssqCtMonoAcc(log10(parmsodCt_1))^2))
+
+ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+ti=sort(unique(ti))
+
+cocult1 = ode(y=c(Bact1 = CtAt01ini,Bact2 = AtCt01ini,Nu=compini,Comp = 0.1),times=ti,func=FuncCoCult,parms= parmtot_1,events = list(func = eventfun, time = ti))
+
+cocult2 = ode(y=c(Bact1 = CtAt075ini,Bact2 = AtCt075ini,Nu=compini,Comp = 0.75),times=ti,func=FuncCoCult,parms=parmtot_1,events = list(func = eventfun, time = ti))
+
+
+plot(CtAt01[,1]~time,col=alpha(colCt[2],0.5),lwd=2,type="l",ylim=c(1e4,1e10),log="y",lty="solid", ylab="CFU/mL",main="Cocultures at 0.1%",bty="n")
+points(CtAt01[,1]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,2]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(CtAt01[,2]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(CtAt01[,3]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,1]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+points(AtCt01[,1]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,2]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(AtCt01[,2]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,3]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+
+lines(Bact1~time,cocult1,col=colCt[2],lty="dotted",lwd=3)
+lines(Bact2~time,cocult1,col=colAt[2],lty="dotted",lwd=3)
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[2],0.5),alpha(colAt[2],0.5),colCt[2],colAt[2]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,2,2),bty="n",cex=0.8)
+
+
+plot(CtAt075[,1]~time,col=alpha(colCt[4],0.5),lwd=2,type="l",log="y",ylim=c(1e4,1e10),lty="solid",ylab="CFU/mL",main="Cocultures at 0.75%",bty="n")
+points(CtAt075[,1]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,2]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,3]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(CtAt075[,2]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+lines(CtAt075[,3]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+points(AtCt075[,1]~time,col=alpha(colAt[4],0.5),lwd=2,type="l",lty="solid")
+points(AtCt075[,1]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,2]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,3]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(AtCt075[,2]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+lines(AtCt075[,3]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+
+points(Bact1~time,cocult2,type="l",col=colCt[4],lwd=5,lty="dotted")
+points(Bact2~time,cocult2,type="l",col=colAt[4],lwd=5,lty="dotted")
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[4],0.5),alpha(colAt[4],0.5),colCt[4],colAt[4]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,3,3),bty="n",cex=0.8)
+
+## Compute the error of model 2 (sum of squares)
+#error at 0.1%
+cocult1df=data.frame(cocult1)
+cocult1df=cocult1df[cocult1df$time %in% time,]
+cocult1df[cocult1df<ext_thr]=ext_thr
+ssqcocult1 = {}
+for (i in 1:nrep) {
+  ssqcocult1 = c(ssqcocult1, log(cocult1df$Bact1) - log(CtAt01[,i]), log(cocult1df$Bact2) - log(AtCt01[,i])) #add residual comparing estimated with the different replicates
+}
+print(paste("Sum of errors at 0.1%: ", sum(ssqcocult1^2)))
+
+#error at 0.75%
+cocult2df=data.frame(cocult2)
+cocult2df=cocult2df[cocult2df$time %in% time,]
+cocult2df[cocult2df<ext_thr]=ext_thr
+ssqcocult2 = {}
+for (i in 1:nrep) {
+  ssqcocult2 = c(ssqcocult2, log(cocult2df$Bact1) - log(CtAt075[,i]), log(cocult2df$Bact2) - log(AtCt075[,i])) #add residual comparing estimated with the different replicates
+}
+print(paste("Sum of errors at 0.75%: ", sum(ssqcocult2^2)))
+print(paste("Total sum of errors: ", sum(ssqcocult2^2)+sum(ssqcocult1^2)))
+
+
+```
+
+## 2. Model 2: explicit toxicity with ROS data
+
+We import the new data of this second experiment.
+
+```{r,echo=FALSE}
+## Importing experimental time series data
+nrep=3
+time = c(0,1,2,3,6,7,8)
+
+load("CFUROS_data_model2.RData")
+
+
+
+
+AtMMini = mean(c(as.numeric(AtMM[1,])))
+AtMMwCtini = mean(as.numeric(AtMMwCt[1,]))
+CtMMini = mean(c(as.numeric(CtMM[1,])))
+CtMMwAtini = mean(as.numeric(CtMMwAt[1,]))
+
+
+
+At01ini=mean(as.numeric(At01[1,]))
+At075ini=mean(as.numeric(At075[1,]))
+Ct01ini=mean(as.numeric(Ct01[1,]))
+Ct075ini=mean(as.numeric(Ct075[1,]))
+
+
+
+AtCt01ini=mean(as.numeric(AtCt01[1,]))
+AtCt075ini=mean(as.numeric(AtCt075[1,]))
+CtAt01ini=mean(as.numeric(CtAt01[1,]))
+CtAt075ini=mean(as.numeric(CtAt075[1,]))
+
+
+mdadata[which(mdadata$norm_532 <= 0),]$norm_532=1e-10
+mdadatacalib=subset(mdadata, culture=="c-")
+mdadatacalib_0 = subset(mdadatacalib, conc==0)
+mdadatacalib_0.1 = subset(mdadatacalib, conc==0.1)
+mdadatacalib_0.75 = subset(mdadatacalib, conc==0.75)
+
+mdaAt = subset(subset(mdadata, culture=="mono"), species =="at")
+mdaCt = subset(subset(mdadata, culture=="mono"), species =="ct")
+mdaAtCtdupli = subset(mdadata, culture=="co")
+mdaAtCt = subset(mdaAtCtdupli,species=="at")
+mdaAt01 = subset(mdaAt, conc==0.1)
+mdaCt01 = subset(mdaCt, conc==0.1)
+mdaAt075 = subset(mdaAt, conc==0.75)
+mdaCt075 = subset(mdaCt, conc==0.75)
+mdaco01 = subset(mdaAtCt,conc==0.1)
+mdaco075 = subset(mdaAtCt,conc==0.75)
+
+
+
+## General functions 
+eventfun <- function(t, y, parms){
+  with (as.list(y),{
+    y[y <= ext_thr] <- 0
+    return(y)
+  })
+}
+```
+
+### 2.1 Fitting growth in MM
+
+Again we first fit the MM parameters by using both mono- and co-cultures in the no-LA condition. We perform again the fitting because the data has changed (new experiment).
+
+```{r,echo=FALSE}
+## Fitting the growth of At and Ct in the no-LA condition (minimal medium) using both coculture and monocuture of At and Ct in the minimal medium
+
+#ODE system for the minimal medium (unknown nutrient arbitrarily)
+
+FuncCoMM_model2=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact1 =rn1*Nu/(Nu + Kn1)*Bact1    
+    dBact2 =rn2*Nu/(Nu + Kn2)*Bact2
+    dNu = - 1/Yn1*rn1*Nu/(Nu + Kn1)*Bact1 - 1/Yn2*rn2*Nu/(Nu + Kn2)*Bact2 
+    return(list(c(dBact1,dBact2,dNu)))
+  })
+}
+
+
+ssqFuncCoMM_model2=function(parmsestim){
+  ssqres = {}
+ 
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  parode = 10^parmsestim
+  
+  #coculture of Ct and At
+  outco=ode(y=c(Bact1=CtMMwAtini,Bact2=AtMMwCtini,Nu=compini),times=ti,func=FuncCoMM_model2,parms=parode, events = list(func = eventfun, time = ti))
+  outcodf=data.frame(outco)
+  outcodf=outcodf[outcodf$time %in% time,]
+  outcodf[outcodf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outcodf$Bact1) - log(CtMMwAt[,i]), log(outcodf$Bact2) - log(AtMMwCt[,i]))
+  }
+  
+  #monocul of Ct
+  outCt=ode(y=c(Bact1=CtMMini,Bact2=0,Nu=compini),times=ti,func=FuncCoMM_model2,parms=parode,events = list(func = eventfun, time = ti))
+  outCtdf=data.frame(outCt)
+  outCtdf=outCtdf[outCtdf$time %in% time,]
+  outCtdf[outCtdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outCtdf$Bact1) - log(CtMM[,i]))
+  }
+  
+  
+  
+  outAt=ode(y=c(Bact1=0,Bact2=AtMMini,Nu=compini),times=ti,func=FuncCoMM_model2,parms=parode,events = list(func = eventfun, time = ti))
+  outAtdf=data.frame(outAt)
+  outAtdf=outAtdf[outAtdf$time %in% time,]
+  outAtdf[outAtdf<ext_thr]=ext_thr
+  
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outAtdf$Bact2) - log(AtMM[,i]))
+  }
+  
+  
+  return(ssqres)
+}
+
+parmsestim = log10(c(rn1=10, rn2=10, Yn1=1e9, Yn2=2e8, Kn1 = 1e-1, Kn2 = 1e-2 ))
+
+
+if (boolfit) {fitMM_model2=modFit(p=parmsestim,f=ssqFuncCoMM_model2)}
+coefs=coef(fitMM_model2)
+```
+
+```{r,echo=FALSE,fig.width=5,fig.height=4}
+# Plotting the growth in MM + the fit
+plot(AtMM[,1]~time,type="l",ylim=c(1e4,1e7),log="y",col=alpha(cola,0.8),lwd=1,ylab="CFU/mL")
+points(AtMM[,1]~time,type="p",pch=19,col=alpha(cola,0.8))
+points(AtMM[,2]~time,type="p",pch=19,col=alpha(cola,0.8))
+points(AtMM[,3]~time,type="p",pch=19,col=alpha(cola,0.8))
+lines(AtMM[,2]~time,col=alpha(cola,0.8),lwd=1)
+lines(AtMM[,3]~time,col=alpha(cola,0.8),lwd=1)
+points(AtMMwCt[,1]~time,type="p",pch=19,col=alpha(cola,0.8))
+lines(AtMMwCt[,1]~time,pch=19,col=alpha(cola,0.8),lty="dashed",lwd=1)
+points(AtMMwCt[,2]~time,type="p",pch=19,col=alpha(cola,0.8))
+lines(AtMMwCt[,2]~time,pch=19,col=alpha(cola,0.8),lty="dashed",lwd=1)
+points(AtMMwCt[,3]~time,type="p",pch=19,col=alpha(cola,0.8))
+lines(AtMMwCt[,3]~time,pch=19,col=alpha(cola,0.8),lty="dashed",lwd=1)
+lines(CtMM[,1]~time,col=alpha(colc,0.8),lwd=1)
+points(CtMM[,1]~time,type="p",pch=19,col=alpha(colc,0.8))
+points(CtMM[,2]~time,type="p",pch=19,col=alpha(colc,0.8))
+points(CtMM[,3]~time,type="p",pch=19,col=alpha(colc,0.8))
+lines(CtMM[,2]~time,col=alpha(colc,0.8),lwd=1)
+lines(CtMM[,3]~time,col=alpha(colc,0.8),lwd=1)
+points(CtMMwAt[,1]~time,type="p",pch=19,col=alpha(colc,0.8))
+lines(CtMMwAt[,1]~time,pch=19,col=alpha(colc,0.8),lty="dashed",lwd=1)
+points(CtMMwAt[,2]~time,type="p",pch=19,col=alpha(colc,0.8))
+lines(CtMMwAt[,2]~time,pch=19,col=alpha(colc,0.8),lty="dashed",lwd=1)
+points(CtMMwAt[,3]~time,type="p",pch=19,col=alpha(colc,0.8))
+lines(CtMMwAt[,3]~time,pch=19,col=alpha(colc,0.8),lty="dashed",lwd=1)
+legend(x="bottomright",
+       c("At","At (Ct)","Ct","Ct (At)"),
+       col=c(alpha(cola,1),alpha(cola,1),alpha(colc,1),alpha(colc,1)),
+       lty=c(1,2,1,2),
+       lwd=c(1,1,1,1),
+       pch=c(20,20,20,20),bty="n")
+coefsconv = 10^coefs
+
+
+sol=ode(y=c(Bact1=CtMMwAtini,Bact2=AtMMwCtini,Nu=compini),times=ti,func=FuncCoMM_model2,parms=coefsconv,events = list(func = eventfun, time = ti))
+points(Bact1~ti,sol,type="l",lwd=8,lty="dashed",col=alpha(colc,0.6))
+points(Bact2~ti,sol,type="l",lwd=8,lty="dashed",col=alpha(cola,0.6))
+ss=ode(y=c(Bact1=CtMMini,Bact2=0,Nu=compini),times=ti,func=FuncCoMM_model2,parms=coefsconv,events = list(func = eventfun, time = ti))
+points(Bact1~ti,ss,type="l",lwd=8,col=alpha(colc,0.6))
+ss2=ode(y=c(Bact1=0,Bact2=AtMMini,Nu=compini),times=ti,func=FuncCoMM_model2,parms=coefsconv,events = list(func = eventfun, time = ti))
+points(Bact2~ti,ss2,type="l",lwd=8,col=alpha(cola,0.6))
+```
+
+```{r,echo=FALSE}
+
+parmsAtMM_model2 = c(rn = as.list(coefsconv)$rn2, Kn =  as.list(coefsconv)$Kn2, Yn =  as.list(coefsconv)$Yn2)
+parmsCtMM_model2 = c(rn = as.list(coefsconv)$rn1, Kn =  as.list(coefsconv)$Kn1, Yn =  as.list(coefsconv)$Yn1)
+
+```
+
+### 2.2 Fitting ROS spontaneous dynamics in LA medium
+
+```{r,echo=FALSE}
+### Spontaneous ROS dynamics with a non linear model
+FuncRosonly = function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dComp = - 1/m*(d*Comp + e*Ros*Comp) #uptake by the two bacteria - spontaneous oxidation - ros triggered oxidation
+    dRos = d*Comp + e*Ros*Comp -l*Ros #oxidation - reox? 
+    return(list(c(dComp,dRos)))
+  })
+}
+
+rosini01 = mean(subset(mdadatacalib_0.1, time==0,select=c(norm_532))[,1])
+rosini075 = mean(subset(mdadatacalib_0.75, time==0,select=c(norm_532))[,1])
+ 
+
+ssqROS = function(par){
+  ssqres = {}
+  tmax=8
+  time=c(0,1,2,3,6,7,8)
+  ti=c(seq(0,tmax,0.01),time)
+  ti=sort(unique(ti))
+  
+  
+  par10 = 10^par
+  
+  ## 0.1%
+  dat = mdadatacalib_0.1
+  
+  out = ode(y=c(Comp=0.1,Ros=rosini01),times=ti,func=FuncRosonly,parms=par10,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  ssqres01 = {}
+  for (i in c("c_01_1","c_01_2","c_01_3")) {
+    ssqres01 = c(ssqres01, log(outdf$Ros) - log(subset(dat, sample==i,select=c(norm_532))[,1]))
+    #ssqres01 = c(ssqres01, (outdf$Ros) - (subset(dat, sample==i,select=c(norm_532))[,1]))
+
+  }
+  
+  ## 0.75%
+  dat = mdadatacalib_0.75
+  rosini = mean(subset(dat, time==0,select=c(norm_532))[,1])
+  
+  out = ode(y=c(Comp=0.75,Ros=rosini075),times=ti,func=FuncRosonly,parms=par10,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  ssqres075 = {}
+  for (i in c("c_075_1","c_075_2","c_075_3")) {
+    #ssqres075 = c(ssqres075, (outdf$Ros) - (subset(dat, sample==i,select=c(norm_532))[,1]))
+    ssqres075 = c(ssqres075, log(outdf$Ros) - log(subset(dat, sample==i,select=c(norm_532))[,1]))
+  }
+  
+  ssqres= c(ssqres01,ssqres075)
+  return(ssqres)
+  
+}
+```
+
+```{r,echo=FALSE}
+parros = log10(c(d=0.1,e=3,m=3,l=1))
+if (boolfit) {fitRos = modFit(f = ssqROS,p=parros,jac = NULL)}
+fitrospar = 10^coef(fitRos)
+
+```
+
+```{r,echo=FALSE,fig.width=5,fig.height=4}
+out = ode(y=c(Comp=0.75,Ros=rosini075),times=ti,func=FuncRosonly,parms=fitrospar,events = list(func = eventfun, time = ti))
+plot(norm_532~time,data=mdadatacalib_0.75,col="red",ylim=c(1e-4,1),log="y",ylab="ROS proxy (a. u.)")
+lines(out[,3]~out[,1],col="red")
+out = ode(y=c(Comp=0.1,Ros=rosini01),times=ti,func=FuncRosonly,parms=fitrospar,events = list(func = eventfun, time = ti))
+lines(out[,3]~out[,1],col="blue")
+points(norm_532~time,data=mdadatacalib_0.1,col="blue")
+legend("bottomright",legend=c("0.1% LA","0.75% LA"),col=c("blue","red"),bty="n",lwd=1)
+
+```
+
+### 2.3 Fitting At monoculture parameters
+
+```{r,echo=FALSE}
+FuncRosMonoAt=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact = rn*Nu/(Nu + Kn)*Bact + rc*Comp/(Comp + Kc)*Bact - beta*Bact*Ros ## growing on LA
+    dNu = - 1/Yn*rn*Nu/(Nu + Kn)*Bact
+    dComp = -1/Yc*rc*Comp/(Comp + Kc)*Bact - 1/m*(d*Comp + e*Ros*Comp) #uptake by the two bacteria - spontaneous oxidation - ros triggered oxidation
+    dRos = d*Comp + e*Ros*Comp -l*Ros - alpha*Bact*Ros   #oxidation - detox 
+    return(list(c(dBact,dNu,dComp,dRos)))
+  })
+}
+
+
+ssqMonoRosAt=function(parmsestAt){
+  ssqres = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  parmsode = c(10^parmsestAt,parmsAtMM,fitrospar) #parmCt does not matter for now
+  # parameters from the parameter estimation routine
+  # solve ODE for a given set of parameters
+  
+  dat = mdaAt01
+  ssqres01 = {}
+  repc= c("at_01_1","at_01_2","at_01_3")
+  
+  
+  out=ode(y=c(Bact=At01ini,Nu=compini,Comp=0.1,Ros=rosini01),times=ti,func=FuncRosMonoAt,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  
+  for (i in 1:nrep) {
+    ssqres01 = c(ssqres01, log(outdf$Bact) - log(At01[,i])) 
+    ssqres01 = c(ssqres01, log(outdf$Ros) - log(subset(dat, sample==repc[i],select=c(norm_532))[,1]))
+  }
+  
+  
+  dat = mdaAt075
+  ssqres075 = {}
+  repc= c("at_075_1","at_075_2","at_075_3")
+  
+  out2=ode(y=c(Bact=At075ini,Nu=compini,Comp=0.75,Ros =rosini075),times=ti,func=FuncRosMonoAt,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  
+  for (i in 1:nrep) {
+    ssqres075 = c(ssqres075, log(outdf2$Bact) - log(At075[,i])) 
+    ssqres075 = c(ssqres075, log(outdf2$Ros) - log(subset(dat, sample==repc[i],select=c(norm_532))[,1]))
+  }
+  
+  ssqres = c(ssqres01,ssqres075)
+ 
+  
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+```
+
+```{r,echo=FALSE}
+parmAt = c(rc = 3, Kc = 0.1, Yc =1e10, beta = 20, alpha = 1e-20)
+if (boolfit) {fitMonoAt_model2 = modFit(f = ssqMonoRosAt,p=log10(parmAt),jac = NULL,lower = c(-5,-6,-5,-5,-100),upper = c(10,10,14,10,10))}
+#coef(fitMonoAt_model2)
+```
+
+```{r,echo=FALSE,fig.width=5,fig.height=4}
+para = c(10^coef(fitMonoAt_model2), parmsAtMM_model2, fitrospar)
+
+out=ode(y=c(Bact = At01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosMonoAt,parms=para,events = list(func = eventfun, time = ti),atol=1e-5)
+
+plot(out[,2]~out[,1],type="l",lwd=5,col=colAt[2],lty="dotted",ylim=c(1,1e10),log="y",main="Fitting monoculture of At (model 2)",xlab="time",ylab="CFU/mL")
+out=ode(y=c(Bact = At075ini,Nu=compini,Comp =0.75,Ros=rosini075),times=ti,func=FuncRosMonoAt,parms=para,events = list(func = eventfun, time = ti),atol=1e-5)
+points(out[,2]~out[,1],type="l",lwd=5,col=colAt[4],lty="dotted")
+
+points(At01[,1]~time,type="l",col=alpha(colAt[2],transpar))
+points(At01[,1]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At01[,2]~time,type="l",col=alpha(colAt[2],transpar))
+points(At01[,2]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At01[,3]~time,type="l",col=alpha(colAt[2],transpar))
+points(At01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+
+lines(At075[,1]~time,type="l",col=alpha(colAt[4],0.5),lwd=2)
+points(At075[,1]~time,type="p",pch=19,col=alpha(colAt[4],0.5),lwd=2)
+lines(At075[,2]~time,type="l",col=alpha(colAt[4],0.5),lwd=2)
+points(At075[,2]~time,type="p",pch=19,col=alpha(colAt[4],0.5),lwd=2)
+lines(At075[,3]~time,type="l",col=alpha(colAt[4],0.5),lwd=2)
+points(At075[,3]~time,type="p",pch=19,col=alpha(colAt[4],0.5),lwd=2)
+legend("bottomleft",legend=c("0.1%","0.75%"),col=c(colAt[2],colAt[4]),pch=19,bty="n",lwd=2)
+```
+
+### 2.4 Fitting Ct monoculture parameters
+
+```{r,echo=FALSE}
+FuncRosMonoCt=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact = rn*Nu/(Nu + Kn)*Bact + rc*Comp/(Comp + Kc)*Bact - beta*Bact*Ros ## growing on LA
+    dNu = - 1/Yn*rn*Nu/(Nu + Kn)*Bact
+    dComp = -1/Yc*rc*Comp/(Comp + Kc)*Bact - 1/m*(d*Comp + e*Ros*Comp) #uptake by the bacteria - spontaneous oxidation - ros triggered oxidation
+    dRos = d*Comp + e*Ros*Comp -l*Ros - alpha*Bact*Ros  #oxidation - detox 
+    return(list(c(dBact,dNu,dComp,dRos)))
+  })
+}
+
+ssqMonoRosCt=function(parmsestCt){
+
+  ssqres = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  parmsode = c(10^parmsestCt,parmsCtMM,fitrospar)
+  
+  repc= c("ct_01_1","ct_01_2","ct_01_3")
+  out=ode(y=c(Bact=Ct01ini,Nu=compini,Comp=0.1,Ros=rosini01),times=ti,func=FuncRosMonoCt,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct01[,i]))
+    ssqres = c(ssqres, log(outdf$Ros) - log(subset(mdaCt01, sample==repc[i],select=c(norm_532))[,1]))
+  }
+  
+  
+  repc= c("ct_075_1","ct_075_2","ct_075_3")
+  out2=ode(y=c(Bact=Ct075ini,Nu=compini,Comp=0.75,Ros=rosini075),times=ti,func=FuncRosMonoCt,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf2$Bact) - log(Ct075[,i])) 
+    ssqres = c(ssqres, log(outdf2$Ros) - log(subset(mdaCt075, sample==repc[i],select=c(norm_532))[,1]) )
+  }
+  
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+
+parmCt = c(rc = 5, Kc = 0.1, Yc =7e9, alpha=0.0001, beta =10)
+# 
+# para = c(parmCt, parmsCtMM_model2,fitrospar)
+# plot(Ct01[,1]~time,type="l",col=alpha(colCt[2],transpar),ylab="CFU ",log="y",ylim=c(1e4,1e10),main="Monoculture of Ct at different linoleic acid concentrations")
+# points(Ct01[,1]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+# lines(Ct01[,2]~time,type="l",col=alpha(colCt[2],transpar))
+# points(Ct01[,2]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+# lines(Ct01[,3]~time,type="l",col=alpha(colCt[2],transpar))
+# points(Ct01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+# 
+# lines(Ct075[,1]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+# points(Ct075[,1]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+# lines(Ct075[,2]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+# points(Ct075[,2]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+# lines(Ct075[,3]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+# points(Ct075[,3]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+# legend("bottomright",legend=c("0.1%","0.75%"),col=c(colCt[2],colCt[4]),pch=19,bty="n",lwd=2)
+# 
+# out=ode(y=c(Bact = Ct01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosMonoCt,parms=para,events = list(func = eventfun, time = ti))
+# points(out[,2]~out[,1],type="l",lwd=5,col=colCt[2],lty="dotted")
+# out=ode(y=c(Bact = Ct075ini,Nu=compini,Comp = 0.75,Ros=rosini075),times=ti,func=FuncRosMonoCt,parms=para,events = list(func = eventfun, time = ti))
+# points(out[,2]~out[,1],type="l",lwd=5,col=colCt[4],lty="dotted")
+```
+
+```{r,echo=FALSE}
+if (boolfit) {fitMonoCt_model2 = modFit(f = ssqMonoRosCt,p=log10(parmCt),jac = NULL,lower = c(-2,-5,0,-10,-10),upper = c(3,3,14,5,5))}
+```
+
+```{r,echo=FALSE}
+#print(10^coef(fitMonoCt_model2))
+```
+
+```{r,echo=FALSE,fig.width=5,fig.height=4}
+para = c(10^coef(fitMonoCt_model2), parmsCtMM_model2,fitrospar)
+plot(Ct01[,1]~time,type="l",col=alpha(colCt[2],transpar),ylab="CFU/mL ",log="y",ylim=c(1e4,1e10),main="Fitting Ct in monoculture (model 2)")
+points(Ct01[,1]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct01[,2]~time,type="l",col=alpha(colCt[2],transpar))
+points(Ct01[,2]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct01[,3]~time,type="l",col=alpha(colCt[2],transpar))
+points(Ct01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+
+lines(Ct075[,1]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+points(Ct075[,1]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+lines(Ct075[,2]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+points(Ct075[,2]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+lines(Ct075[,3]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+points(Ct075[,3]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+legend("bottomright",legend=c("0.05%","0.1%","0.5%","0.75%"),col=colCt,pch=19,bty="n",lwd=2)
+
+out=ode(y=c(Bact = Ct01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosMonoCt,parms=para,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=colCt[2],lty="dotted")
+out=ode(y=c(Bact = Ct075ini,Nu=compini,Comp = 0.75,Ros=rosini075),times=ti,func=FuncRosMonoCt,parms=para,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=colCt[4],lty="dotted")
+
+```
+
+### 2.5 Comparing co-cultures and mono-cultures
+
+```{r,echo=FALSE,fig.height=6,fig.width=12}
+coefCtmono = as.list(10^coef(fitMonoCt_model2))
+coefAtmono = as.list(10^coef(fitMonoAt_model2))
+
+coeftot_model2 = list(rc1 = coefCtmono$rc,
+               Kc1 = coefCtmono$Kc,
+               beta1 = coefCtmono$beta,
+               Yc1 = coefCtmono$Yc,
+               alpha1 = coefCtmono$alpha,
+
+               rc2 = coefAtmono$rc,
+               Kc2 = coefAtmono$Kc,
+               beta2 = coefAtmono$beta,
+               Yc2 = coefAtmono$Yc,
+               alpha2 = coefAtmono$alpha)
+parmtot_model2 = c(coeftot_model2, as.list(10^coef(fitMM_model2)), as.list(fitrospar))
+
+
+
+FuncRosCo=function(t,state,parms){
+  with(as.list(c(state,parms)), {
+    dBact1 = rn1*Nu/(Nu + Kn1)*Bact1 + rc1*Comp/(Comp + Kc1)*Bact1 - beta1*Bact1*Ros ## growing on LA
+    
+    dBact2 = rn2*Nu/(Nu + Kn2)*Bact2 + rc2*Comp/(Comp + Kc2)*Bact2 - beta2*Bact2*Ros #growing on LA minus some toxicity of the ROS
+    
+    dNu = - 1/Yn1*rn1*Nu/(Nu + Kn1)*Bact1 - 1/Yn2*rn2*Nu/(Nu + Kn2)*Bact2
+    
+    dComp = -1/Yc1*rc1*Comp/(Comp + Kc1)*Bact1 -1/Yc2*rc2*Comp/(Comp + Kc2)*Bact2 - 1/m*(d*Comp + e*Ros*Comp) #uptake by the two bacteria - spontaneous oxidation - ros triggered oxidation
+    
+    dRos = d*Comp + e*Ros*Comp - l*Ros - alpha1*Bact1*Ros - alpha2*Bact2*Ros 
+    
+    
+    return(list(c(dBact1,dBact2,dNu,dComp,dRos)))
+  })
+}
+
+
+cocult1 = ode(y=c(Bact1 = CtAt01ini,Bact2 = AtCt01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosCo,parms= parmtot_model2,events = list(func = eventfun, time = ti))
+
+cocult2 = ode(y=c(Bact1 = CtAt075ini,Bact2 = AtCt075ini,Nu=compini,Comp = 0.75,Ros=rosini075),times=ti,func=FuncRosCo,parms=parmtot_model2,events = list(func = eventfun, time = ti))
+
+par(mfrow=c(1,2))
+
+plot(CtAt01[,1]~time,col=alpha(colCt[2],0.5),lwd=2,type="l",ylim=c(1e4,1e10),log="y",lty="solid", ylab="CFU/mL",main="Cocultures at 0.1%",bty="n")
+points(CtAt01[,1]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,2]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(CtAt01[,2]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(CtAt01[,3]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,1]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+points(AtCt01[,1]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,2]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(AtCt01[,2]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,3]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+
+lines(Bact1~time,cocult1,col=colCt[2],lty="dotted",lwd=3)
+lines(Bact2~time,cocult1,col=colAt[2],lty="dotted",lwd=3)
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[2],0.5),alpha(colAt[2],0.5),colCt[2],colAt[2]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,2,2),bty="n",cex=0.8)
+
+
+plot(CtAt075[,1]~time,col=alpha(colCt[4],0.5),lwd=2,type="l",log="y",ylim=c(1e4,1e10),lty="solid",ylab="CFU/mL",main="Cocultures at 0.75%",bty="n")
+points(CtAt075[,1]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,2]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,3]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(CtAt075[,2]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+lines(CtAt075[,3]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+points(AtCt075[,1]~time,col=alpha(colAt[4],0.5),lwd=2,type="l",lty="solid")
+points(AtCt075[,1]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,2]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,3]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(AtCt075[,2]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+lines(AtCt075[,3]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+
+points(Bact1~time,cocult2,type="l",col=colCt[4],lwd=5,lty="dotted")
+points(Bact2~time,cocult2,type="l",col=colAt[4],lwd=5,lty="dotted")
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[4],0.5),alpha(colAt[4],0.5),colCt[4],colAt[4]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,3,3),bty="n",cex=0.8)
+
+```
+
+```{r,echo=FALSE}
+## Compute the error of model 2 (sum of squares)
+
+#error at 0.1%
+cocult1df=data.frame(cocult1)
+cocult1df=cocult1df[cocult1df$time %in% time,]
+cocult1df[cocult1df<ext_thr]=ext_thr
+ssqcocult1 = {}
+for (i in 1:nrep) {
+  ssqcocult1 = c(ssqcocult1, log(cocult1df$Bact1) - log(CtAt01[,i]), log(cocult1df$Bact2) - log(AtCt01[,i])) #add residual comparing estimated with the different replicates
+}
+print(paste("Sum of errors at 0.1%: ", sum(ssqcocult1^2)))
+
+#error at 0.75%
+cocult2df=data.frame(cocult2)
+cocult2df=cocult2df[cocult2df$time %in% time,]
+cocult2df[cocult2df<ext_thr]=ext_thr
+ssqcocult2 = {}
+for (i in 1:nrep) {
+  ssqcocult2 = c(ssqcocult2, log(cocult2df$Bact1) - log(CtAt075[,i]), log(cocult2df$Bact2) - log(AtCt075[,i])) #add residual comparing estimated with the different replicates
+}
+print(paste("Sum of errors at 0.75%: ", sum(ssqcocult2^2)))
+
+
+print(paste("Total sum of errors: ", sum(ssqcocult2^2)+sum(ssqcocult1^2)))
+```
+
+### 2.6 Parameter set of the main text
+
+```{r,echo=FALSE}
+ssqMonoRosAt_onlyCFU=function(parmsestAt){
+  ssqres = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  #parmsode = c(10^parmsestAt,parmsAtMM,fitrospar)
+  # parameters from the parameter estimation routine
+  # solve ODE for a given set of parameters
+  
+  parmsode = parmsestAt
+
+  ssqres01 = {}
+   
+  out=ode(y=c(Bact=At01ini,Nu=compini,Comp=0.1,Ros=rosini01),times=ti,func=FuncRosMonoAt,parms=parmsode,events = list(func = eventfun, time = ti))
+  # Filter data that contains time points where data is available
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  
+  for (i in 1:nrep) {
+    ssqres01 = c(ssqres01, log(outdf$Bact) - log(At01[,i])) 
+   
+  }
+  
+  
+
+  ssqres075 = {}
+  out2=ode(y=c(Bact=At075ini,Nu=compini,Comp=0.75,Ros =rosini075),times=ti,func=FuncRosMonoAt,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  
+  for (i in 1:nrep) {
+    ssqres075 = c(ssqres075, log(outdf2$Bact) - log(At075[,i])) 
+  }
+  
+  ssqres = c(ssqres01,ssqres075)
+ 
+  
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+
+
+ssqMonoRosCt_onlyCFU=function(parmsestCt){
+
+  ssqres = {}
+  ti=c(seq(0,tmax,0.01),c(0,1,2,3,6,7,8))
+  ti=sort(unique(ti))
+  
+  #parmsode = c(10^parmsestCt,parmsCtMM,fitrospar)
+  parmsode = parmsestCt
+  
+  out=ode(y=c(Bact=Ct01ini,Nu=compini,Comp=0.1,Ros=rosini01),times=ti,func=FuncRosMonoCt,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf=data.frame(out)
+  outdf=outdf[outdf$time %in% time,]
+  outdf[outdf<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf$Bact) - log(Ct01[,i]))
+  }
+  
+  
+  out2=ode(y=c(Bact=Ct075ini,Nu=compini,Comp=0.75,Ros=rosini075),times=ti,func=FuncRosMonoCt,parms=parmsode,events = list(func = eventfun, time = ti))
+  outdf2=data.frame(out2)
+  outdf2=outdf2[outdf2$time %in% time,]
+  outdf2[outdf2<ext_thr]=ext_thr
+  for (i in 1:nrep) {
+    ssqres = c(ssqres, log(outdf2$Bact) - log(Ct075[,i])) 
+  }
+  
+  # return predicted vs experimental residual
+  return(na.omit(ssqres))
+}
+
+parmtot_2 = list(rc1 = 3.494828,
+               Kc1 = 0.04394823,
+               beta1 = 8.580369,
+               Yc1 = 5788433873,
+               alpha1 = 4.612671e-06,
+               rn1 = 5.518182,
+               Kn1 = 0.00103794,
+               Yn1 = 407993404,
+               rc2 = 2.368324,
+               Kc2 = 0.04856385,
+               beta2 = 20.0305,
+               Yc2 = 1e+10,
+               alpha2 = 0,
+               rn2 = 126.4633,
+               Kn2 = 0.3570926,
+               Yn2 = 326741920,
+               m = 0.879171,
+               d = 0.1139162,
+               e = 1.941401,
+               l = 0.346206)
+
+parAt_2 = list(rc = 2.368324,
+               Kc = 0.04856385,
+               beta = 20.0305,
+               Yc = 1e+10,
+               alpha = 0,
+               rn = 126.4633,
+               Kn = 0.3570926,
+               Yn = 326741920,
+               m = 0.879171,
+               d = 0.1139162,
+               e = 1.941401,
+               l = 0.346206)
+
+parCt_2 = list(rc = 3.494828,
+               Kc = 0.04394823,
+               beta = 8.580369,
+               Yc = 5788433873,
+               alpha = 4.612671e-06,
+               rn = 5.518182,
+               Kn = 0.00103794,
+               Yn = 407993404,
+               m = 0.879171,
+               d = 0.1139162,
+               e = 1.941401,
+               l = 0.346206)
+
+#sum((ssqMonoRosAt_onlyCFU(parAt_2))^2) + sum((ssqMonoRosCt_onlyCFU(parCt_2))^2)
+
+```
+
+```{r,echo=FALSE,fig.width=15,fig.height=10}
+par(mfrow=c(2,2))
+out=ode(y=c(Bact = At01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosMonoAt,parms=parAt_2,events = list(func = eventfun, time = ti),atol=1e-5)
+
+plot(out[,2]~out[,1],type="l",lwd=5,col=colAt[2],lty="dotted",ylim=c(1,1e10),log="y",main="Fitting At in monoculture (model 2)")
+out=ode(y=c(Bact = At075ini,Nu=compini,Comp =0.75,Ros=rosini075),times=ti,func=FuncRosMonoAt,parms=parAt_2,events = list(func = eventfun, time = ti),atol=1e-5)
+points(out[,2]~out[,1],type="l",lwd=5,col=colAt[4],lty="dotted")
+
+points(At01[,1]~time,type="l",col=alpha(colAt[2],transpar))
+points(At01[,1]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At01[,2]~time,type="l",col=alpha(colAt[2],transpar))
+points(At01[,2]~time,type="p",pch=19,col=alpha(colAt[3],transpar))
+lines(At01[,3]~time,type="l",col=alpha(colAt[2],transpar))
+points(At01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+
+lines(At075[,1]~time,type="l",col=alpha(colAt[4],0.5),lwd=2)
+points(At075[,1]~time,type="p",pch=19,col=alpha(colAt[4],0.5),lwd=2)
+lines(At075[,2]~time,type="l",col=alpha(colAt[4],0.5),lwd=2)
+points(At075[,2]~time,type="p",pch=19,col=alpha(colAt[4],0.5),lwd=2)
+lines(At075[,3]~time,type="l",col=alpha(colAt[4],0.5),lwd=2)
+points(At075[,3]~time,type="p",pch=19,col=alpha(colAt[4],0.5),lwd=2)
+legend("bottomleft",legend=c("0.1%","0.75%"),col=c(colAt[2],colAt[4]),pch=19,bty="n",lwd=2)
+
+
+
+plot(Ct01[,1]~time,type="l",col=alpha(colCt[2],transpar),ylab="CFU/mL ",log="y",ylim=c(1e4,1e10),main="Fitting Ct in monoculture (model 2)")
+points(Ct01[,1]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct01[,2]~time,type="l",col=alpha(colCt[2],transpar))
+points(Ct01[,2]~time,type="p",pch=19,col=alpha(colCt[3],transpar))
+lines(Ct01[,3]~time,type="l",col=alpha(colCt[2],transpar))
+points(Ct01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+
+lines(Ct075[,1]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+points(Ct075[,1]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+lines(Ct075[,2]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+points(Ct075[,2]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+lines(Ct075[,3]~time,type="l",col=alpha(colCt[4],0.5),lwd=2)
+points(Ct075[,3]~time,type="p",pch=19,col=alpha(colCt[4],0.5),lwd=2)
+legend("bottomright",legend=c("0.1%","0.75%"),col=c(colCt[2],colCt[4]),pch=19,bty="n",lwd=2)
+
+out=ode(y=c(Bact = Ct01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosMonoCt,parms=parCt_2,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=colCt[2],lty="dotted")
+out=ode(y=c(Bact = Ct075ini,Nu=compini,Comp = 0.75,Ros=rosini075),times=ti,func=FuncRosMonoCt,parms=parCt_2,events = list(func = eventfun, time = ti))
+points(out[,2]~out[,1],type="l",lwd=5,col=colCt[4],lty="dotted")
+
+
+cocult1 = ode(y=c(Bact1 = CtAt01ini,Bact2 = AtCt01ini,Nu=compini,Comp = 0.1,Ros=rosini01),times=ti,func=FuncRosCo,parms= parmtot_2,events = list(func = eventfun, time = ti))
+
+cocult2 = ode(y=c(Bact1 = CtAt075ini,Bact2 = AtCt075ini,Nu=compini,Comp = 0.75,Ros=rosini075),times=ti,func=FuncRosCo,parms=parmtot_2,events = list(func = eventfun, time = ti))
+
+
+plot(CtAt01[,1]~time,col=alpha(colCt[2],0.5),lwd=2,type="l",ylim=c(1e4,1e10),log="y",lty="solid", ylab="CFU/mL",main="Cocultures at 0.1%",bty="n")
+points(CtAt01[,1]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,2]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+points(CtAt01[,3]~time,type="p",pch=19,col=alpha(colCt[2],transpar))
+lines(CtAt01[,2]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(CtAt01[,3]~time,col=alpha(colCt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,1]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+points(AtCt01[,1]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,2]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+points(AtCt01[,3]~time,type="p",pch=19,col=alpha(colAt[2],transpar))
+lines(AtCt01[,2]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+lines(AtCt01[,3]~time,col=alpha(colAt[2],0.5),lwd=2,lty="solid")
+
+lines(Bact1~time,cocult1,col=colCt[2],lty="dotted",lwd=3)
+lines(Bact2~time,cocult1,col=colAt[2],lty="dotted",lwd=3)
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[2],0.5),alpha(colAt[2],0.5),colCt[2],colAt[2]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,2,2),bty="n",cex=0.8)
+
+
+plot(CtAt075[,1]~time,col=alpha(colCt[4],0.5),lwd=2,type="l",log="y",ylim=c(1e4,1e10),lty="solid",ylab="CFU/mL",main="Cocultures at 0.75%",bty="n")
+points(CtAt075[,1]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,2]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+points(CtAt075[,3]~time,type="p",pch=19,col=alpha(colCt[4],transpar))
+lines(CtAt075[,2]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+lines(CtAt075[,3]~time,col=alpha(colCt[4],0.5),lwd=2,lty="solid")
+points(AtCt075[,1]~time,col=alpha(colAt[4],0.5),lwd=2,type="l",lty="solid")
+points(AtCt075[,1]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,2]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+points(AtCt075[,3]~time,type="p",pch=19,col=alpha(colAt[4],transpar))
+lines(AtCt075[,2]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+lines(AtCt075[,3]~time,col=alpha(colAt[4],0.5),lwd=2,lty="solid")
+
+points(Bact1~time,cocult2,type="l",col=colCt[4],lwd=5,lty="dotted")
+points(Bact2~time,cocult2,type="l",col=colAt[4],lwd=5,lty="dotted")
+legend("bottomright",legend=c("Ct(At) (data)","At(Ct) (data)","Ct(At) (prediction)","At(Ct) (prediction)"),col=c(alpha(colCt[4],0.5),alpha(colAt[4],0.5),colCt[4],colAt[4]),lty=c("solid","solid","dotted","dotted"),lwd=c(2,2,3,3),bty="n",cex=0.8)
+
+## Compute the error of model 2 (sum of squares)
+#error at 0.1%
+cocult1df=data.frame(cocult1)
+cocult1df=cocult1df[cocult1df$time %in% time,]
+cocult1df[cocult1df<ext_thr]=ext_thr
+ssqcocult1 = {}
+for (i in 1:nrep) {
+  ssqcocult1 = c(ssqcocult1, log(cocult1df$Bact1) - log(CtAt01[,i]), log(cocult1df$Bact2) - log(AtCt01[,i])) #add residual comparing estimated with the different replicates
+}
+print(paste("Sum of errors at 0.1%: ", sum(ssqcocult1^2)))
+
+#error at 0.75%
+cocult2df=data.frame(cocult2)
+cocult2df=cocult2df[cocult2df$time %in% time,]
+cocult2df[cocult2df<ext_thr]=ext_thr
+ssqcocult2 = {}
+for (i in 1:nrep) {
+  ssqcocult2 = c(ssqcocult2, log(cocult2df$Bact1) - log(CtAt075[,i]), log(cocult2df$Bact2) - log(AtCt075[,i])) #add residual comparing estimated with the different replicates
+}
+print(paste("Sum of errors at 0.75%: ", sum(ssqcocult2^2)))
+
+
+print(paste("Total sum of errors: ", sum(ssqcocult2^2)+sum(ssqcocult1^2)))
+
+```
+
+### 2.7 Example of transfer trajectory
+
+```{r,echo=FALSE,fig.width=12,fig.height=6}
+dur = 3
+t = seq(0,dur,0.01)
+dil = 100
+
+partransfer = parmtot_2
+names=c("time","Ct","At","Nu","Comp","Ros")
+transferAtmono_01=matrix(ncol=6,nrow=0)
+transferCtmono_01=matrix(ncol=6,nrow=0)
+transferco_01=matrix(ncol=6,nrow=0)
+
+At01mono_start = 1e6
+Ct01mono_start = 1e5
+AtwCt01_start = 1e6
+CtwAt01_start = 1e5
+
+
+transferAtmono_075=matrix(ncol=6,nrow=0)
+transferCtmono_075=matrix(ncol=6,nrow=0)
+transferco_075=matrix(ncol=6,nrow=0)
+
+At075mono_start = 1e6
+Ct075mono_start = 1e5
+AtwCt075_start = 1e6
+CtwAt075_start = 1e5
+
+
+nbtransfer = 8
+
+for (i in 1:nbtransfer){
+  
+    outco01=ode(y=c(Bact1 = CtwAt01_start,Bact2 = AtwCt01_start,Nu=compini,Comp = 0.1,Ros=rosini01),times=t,func=FuncRosCo,parms=partransfer,events = list(func = eventfun, time = t))
+    transferco_01 = rbind(transferco_01,outco01)
+    CtwAt01_start = as.data.frame(outco01)$Bact1[length(as.data.frame(outco01)$Bact1)] / dil
+    AtwCt01_start = as.data.frame(outco01)$Bact2[length(as.data.frame(outco01)$Bact2)] / dil
+    
+    outmonoAt01=ode(y=c(Bact1 = 0,Bact2 = At01mono_start,Nu=compini,Comp = 0.1,Ros=rosini01),times=t,func=FuncRosCo,parms=partransfer,events = list(func = eventfun, time = t))
+    transferAtmono_01 = rbind(transferAtmono_01,outmonoAt01)
+    At01mono_start = as.data.frame(outmonoAt01)$Bact2[length(as.data.frame(outmonoAt01)$Bact2)] / dil
+   
+    outmonoCt01=ode(y=c(Bact1 = Ct01mono_start,Bact2 = 0,Nu=compini,Comp = 0.1,Ros=rosini01),times=t,func=FuncRosCo,parms=partransfer,events = list(func = eventfun, time = t))
+    transferCtmono_01 = rbind(transferCtmono_01,outmonoCt01)
+    Ct01mono_start = as.data.frame(outmonoCt01)$Bact1[length(as.data.frame(outmonoCt01)$Bact1)] / dil
+    
+    
+    
+    outco075=ode(y=c(Bact1 = CtwAt075_start,Bact2 = AtwCt075_start,Nu=compini,Comp = 0.75,Ros=rosini075),times=t,func=FuncRosCo,parms=partransfer,events = list(func = eventfun, time = t))
+    transferco_075 = rbind(transferco_075,outco075)
+    CtwAt075_start = as.data.frame(outco075)$Bact1[length(as.data.frame(outco075)$Bact1)] / dil
+    AtwCt075_start = as.data.frame(outco075)$Bact2[length(as.data.frame(outco075)$Bact2)] / dil
+    
+    outmonoAt075=ode(y=c(Bact1 = 0,Bact2 = At075mono_start,Nu=compini,Comp = 0.75,Ros=rosini075),times=t,func=FuncRosCo,parms=partransfer,events = list(func = eventfun, time = t))
+    transferAtmono_075 = rbind(transferAtmono_075,outmonoAt075)
+    At075mono_start = as.data.frame(outmonoAt075)$Bact2[length(as.data.frame(outmonoAt075)$Bact2)] / dil
+   
+    outmonoCt075=ode(y=c(Bact1 = Ct075mono_start,Bact2 = 0,Nu=compini,Comp = 0.75,Ros=rosini075),times=t,func=FuncRosCo,parms=partransfer,events = list(func = eventfun, time = t))
+    transferCtmono_075 = rbind(transferCtmono_075,outmonoCt075)
+    Ct075mono_start = as.data.frame(outmonoCt075)$Bact1[length(as.data.frame(outmonoCt075)$Bact1)] / dil
+    
+    t = t + dur
+}
+```
+
+```{r,echo=FALSE}
+transferco_01 = as.data.frame(transferco_01)
+transferCtmono_01 = as.data.frame(transferCtmono_01)
+transferAtmono_01 = as.data.frame(transferAtmono_01)
+
+transferco_075 = as.data.frame(transferco_075)
+transferCtmono_075 = as.data.frame(transferCtmono_075)
+transferAtmono_075 = as.data.frame(transferAtmono_075)
+```
+
+```{r,echo=FALSE}
+transferco_01$ntransfer = transferco_01$time/3
+transferAtmono_01$ntransfer = transferAtmono_01$time/3
+transferCtmono_01$ntransfer = transferCtmono_01$time/3
+
+transferco_075$ntransfer = transferco_075$time/3
+transferAtmono_075$ntransfer = transferAtmono_075$time/3
+transferCtmono_075$ntransfer = transferCtmono_075$time/3
+
+```
+
+```{r,echo=FALSE,fig.width=12,fig.height=6}
+#pdf(file = "transfertraj.pdf",width=10,height=5)
+par(mfrow=c(1,2))
+plot(transferco_01$ntransfer,transferco_01$Bact1,log="y",type="l",col = colCt[2],lwd=2,ylim=c(1e4,1e10),xlab="Transfer", ylab = "CFU/mL",lty="dashed",main="Transfer simulation in 0.1% LA")
+lines(transferco_01$ntransfer,transferco_01$Bact2,type="l",col = colAt[2],lwd=2,lty="dashed")
+lines(transferCtmono_01$ntransfer,transferCtmono_01$Bact1,type="l",col = colCt[2],lwd=2)
+lines(transferAtmono_01$ntransfer,transferAtmono_01$Bact2,type="l",col = colAt[2],lwd=2)
+legend("bottomright",legend=c("Ct","At","Ct(At)","At(Ct)"),col=c(colCt[2],colAt[2],colCt[2],colAt[2]),lty=c("solid","solid","dashed","dashed"),lwd=c(2,2,2,2),bty="n",cex=0.8)
+
+
+
+plot(transferco_075$ntransfer,transferco_075$Bact1,log="y",type="l",col = colCt[4],lwd=2,ylim=c(1e4,1e10),xlab="Transfer", ylab = "CFU/mL",lty="dashed",main="Transfer simulation in 0.75% LA")
+lines(transferco_075$ntransfer,transferco_075$Bact2,type="l",col = colAt[4],lwd=2,lty="dashed")
+lines(transferCtmono_075$ntransfer,transferCtmono_075$Bact1,type="l",col = colCt[4],lwd=2)
+lines(transferAtmono_075$ntransfer,transferAtmono_075$Bact2,type="l",col = colAt[4],lwd=2)
+legend("right",legend=c("Ct","At","Ct(At)","At(Ct)"),col=c(colCt[4],colAt[4],colCt[4],colAt[4]),lty=c("solid","solid","dashed","dashed"),lwd=c(2,2,2,2),bty="n",cex=0.8)
+
+#dev.off()
+
+```
