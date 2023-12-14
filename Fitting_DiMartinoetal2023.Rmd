@@ -1783,3 +1783,23 @@ legend("right",legend=c("Ct","At","Ct(At)","At(Ct)"),col=c(colCt[4],colAt[4],col
 #dev.off()
 
 ```
+```{r}
+coex = read.delim("Model2_cocult_5.txt")
+coex$finstate = as.factor(coex$finstate)
+mod2_5transf=ggplot(data=coex, mapping = aes(x =LA_initialconc , y = dilu, fill=finstate)) +
+  geom_raster(aes(fill = factor(finstate))) +
+  scale_color_manual(values=c(colCt[4],"grey","pink","darkgreen"),
+                     aesthetics = c("colour", "fill"),
+                     name = "Species surviving after 5 transfers",
+                     labels=c("Ct alone", "Extinction of both", "Coexistence: Ct and At", "At alone"),
+                     breaks=c("Ct","ext","coex","At")
+  ) +
+  ylab(expression("Transfer dilution rate")) +
+  xlab(expression("Initial linoleic acid concentration"))+
+  theme(text = element_text(size=15)) +
+  labs(title = "Model 2") +
+  theme(plot.title = element_text(size = 15))+
+  theme(aspect.ratio=1)
+mod2_5transf
+```
+
